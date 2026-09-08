@@ -1,0 +1,111 @@
+{
+  "findings": [
+    {
+      "confidence": "high",
+      "explanation": "The module creates a regional policy and a default-deny ingress rule on it, but there is no google_compute_region_network_firewall_policy_association. The global policy gets one (google_compute_network_firewall_policy_association.main). An unassociated policy is inert, so the regional deny_ingress rule at priority 65000 never evaluates traffic. Consumers reading the README ('a regional network firewall policy') reasonably assume it is enforced.",
+      "file": "google_compute_region_network_firewall_policy.main.tf",
+      "first_seen": "2026-09-08",
+      "fix": "resource \"google_compute_region_network_firewall_policy_association\" \"main\" {\n  name              = \"${var.name}-regional-association\"\n  region            = var.region\n  attachment_target = var.network\n  firewall_policy   = google_compute_region_network_firewall_policy.main.name\n}",
+      "fixable": true,
+      "id": "HOLDEN_BP_001",
+      "last_seen": "2026-09-08",
+      "line": 1,
+      "principle": "reliability",
+      "remediation": "Add a google_compute_region_network_firewall_policy_association attaching the regional policy to var.network in var.region, or document explicitly that the caller is responsible for associating it.",
+      "resource": "google_compute_region_network_firewall_policy.main",
+      "severity": "MEDIUM",
+      "status": "fixed",
+      "title": "Regional network firewall policy is created but never associated with a network"
+    },
+    {
+      "confidence": "high",
+      "explanation": "The README tells consumers to add their own rules above priority 65000, but every rule resource inside this module sets firewall_policy = <policy>.name, not .id (see google_compute_network_firewall_policy_rule.allow_health_checks:2). The module exports only .id, so a consumer cannot wire up an extra google_compute_network_firewall_policy_rule without re-deriving the name by string concatenation.",
+      "file": "outputs.tf",
+      "first_seen": "2026-09-08",
+      "fix": "output \"network_policy_name\" {\n  value       = google_compute_network_firewall_policy.main.name\n  description = \"Name of the global network firewall policy, for attaching additional rules\"\n}\n\noutput \"region_policy_name\" {\n  value       = google_compute_region_network_firewall_policy.main.name\n  description = \"Name of the regional network firewall policy, for attaching additional rules\"\n}\n\noutput \"hierarchical_policy_name\" {\n  value       = try(google_compute_firewall_policy.hierarchical[0].name, null)\n  description = \"Generated name of the hierarchical firewall policy, null when var.parent is unset\"\n}",
+      "fixable": true,
+      "id": "HOLDEN_BP_002",
+      "last_seen": "2026-09-08",
+      "line": 1,
+      "principle": "maintainability",
+      "remediation": "Add name outputs alongside the id outputs for all three policies.",
+      "resource": "output.network_policy_id",
+      "severity": "LOW",
+      "status": "fixed",
+      "title": "Outputs expose only policy IDs, but rule resources need the policy name"
+    },
+    {
+      "confidence": "medium",
+      "explanation": "deny_egress (0.0.0.0/0, ip_protocol all) and deny_ingress (0.0.0.0/0, ip_protocol all) both set enable_logging = true as a literal. Catch-all deny rules on a busy VPC are the highest-volume rules in the policy, and every hit becomes a Cloud Logging entry billed at ingestion. There is no variable to turn this off or scope it, so a consumer who only wants the allow rules logged has to fork the module.",
+      "file": "google_compute_network_firewall_policy_rule.deny_egress.tf",
+      "first_seen": "2026-09-08",
+      "fixable": false,
+      "id": "HOLDEN_BP_003",
+      "last_seen": "2026-09-08",
+      "line": 6,
+      "principle": "cost",
+      "remediation": "Introduce a variable (e.g. var.log_denied_traffic, default true) driving enable_logging on the two catch-all deny rules, so the security-useful default is kept but the cost is controllable. Note HLD_GCP_367 requires logging on firewall policy rules, so any default other than true needs a holden:ignore justification.",
+      "resource": "google_compute_network_firewall_policy_rule.deny_egress",
+      "severity": "LOW",
+      "status": "fixed",
+      "title": "Logging is hardcoded on for catch-all deny rules with no way to disable it"
+    },
+    {
+      "confidence": "high",
+      "explanation": "Priorities 1000 (allow_health_checks, deny_rdp) and 65000 (deny_egress, deny_ingress) are literals. Priorities are unique per policy in GCP, so a consumer adding their own rule at 1000 gets an apply-time API error and has no module knob to move the built-in rule out of the way.",
+      "file": "google_compute_network_firewall_policy_rule.allow_health_checks.tf",
+      "first_seen": "2026-09-08",
+      "fixable": false,
+      "id": "HOLDEN_BP_004",
+      "last_seen": "2026-09-08",
+      "line": 3,
+      "principle": "maintainability",
+      "remediation": "Expose the priorities as variables with the current values as defaults, e.g. var.health_check_priority = 1000 and var.default_deny_priority = 65000.",
+      "resource": "google_compute_network_firewall_policy_rule.allow_health_checks",
+      "severity": "LOW",
+      "status": "fixed",
+      "title": "Rule priorities are hardcoded, so consumers cannot avoid collisions"
+    },
+    {
+      "confidence": "high",
+      "explanation": "count = var.parent == \"\" ? 0 : 1 appears in both google_compute_firewall_policy.hierarchical.tf:2 and google_compute_firewall_policy_rule.deny_rdp.tf:2. The rule indexes hierarchical[0] unconditionally, so if the two expressions ever drift the rule fails at plan time with an index error rather than a clear message.",
+      "file": "google_compute_firewall_policy_rule.deny_rdp.tf",
+      "first_seen": "2026-09-08",
+      "fix": "locals {\n  create_hierarchical = var.parent != \"\"\n}",
+      "fixable": true,
+      "id": "HOLDEN_BP_005",
+      "last_seen": "2026-09-08",
+      "line": 2,
+      "principle": "maintainability",
+      "remediation": "Extract to a local (local.create_hierarchical = var.parent != \"\") and use count = local.create_hierarchical ? 1 : 0 in both places.",
+      "resource": "google_compute_firewall_policy_rule.deny_rdp",
+      "severity": "INFO",
+      "status": "fixed",
+      "title": "Hierarchical count guard is duplicated across two files"
+    },
+    {
+      "confidence": "high",
+      "explanation": "example/examplea is the only example and omits var.parent, so google_compute_firewall_policy.hierarchical and google_compute_firewall_policy_rule.deny_rdp are always count = 0 in CI. Two of the module's seven resources, plus the try() in hierarchical_policy_id, are never validated or planned.",
+      "file": "example/examplea/module.firewall_policy.tf",
+      "first_seen": "2026-09-08",
+      "fixable": false,
+      "id": "HOLDEN_BP_006",
+      "last_seen": "2026-09-08",
+      "line": 3,
+      "principle": "repeatability",
+      "remediation": "Add a second example (example/exampleb) that sets parent, or make parent settable via a tfvars in CI. A hierarchical policy needs roles/compute.orgSecurityResourceAdmin, so a plan-only check may be the practical ceiling.",
+      "resource": "module.firewall_policy",
+      "severity": "INFO",
+      "status": "fixed",
+      "title": "The hierarchical code path is never exercised by an example"
+    }
+  ],
+  "scan_date": "2026-09-08T10:30:00Z",
+  "scan_path": ".",
+  "suggested_policies": [
+    {
+      "rationale": "GCP firewall policy rules have no name attribute, only a numeric priority, so the description field is the only place the intent of a rule is recorded. A rule without one is unreviewable in the console and in a plan diff. This is a concrete, unambiguous attribute check across the three rule resource types, and holden currently has only HLD_GCP_367 (logging) on these types.",
+      "yaml": "id: HLD_GCP_XXX\nname: Firewall policy rules should have a description\nprinciple: maintainability\nseverity: LOW\nrationale: |\n  GCP firewall policy rules are identified only by a numeric priority; they have\n  no name. Without a description there is nothing in the console, the API, or a\n  Terraform plan diff that records why the rule exists, which makes review and\n  safe removal of stale rules impossible.\nremediation: |\n  Add a description to each rule:\n    resource \"google_compute_network_firewall_policy_rule\" \"example\" {\n      priority    = 1000\n      description = \"Google load balancer health check probes\"\n      ...\n    }\nresources:\n  google_compute_network_firewall_policy_rule:\n    path: description\n    not_null: true\n  google_compute_region_network_firewall_policy_rule:\n    path: description\n    not_null: true\n  google_compute_firewall_policy_rule:\n    path: description\n    not_null: true\n"
+    }
+  ]
+}
