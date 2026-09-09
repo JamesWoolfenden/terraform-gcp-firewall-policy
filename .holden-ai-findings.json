@@ -1,0 +1,110 @@
+{
+  "findings": [
+    {
+      "confidence": "high",
+      "explanation": "The catch-all EGRESS deny sits on the global policy, which applies to every VM on the network. The catch-all INGRESS deny sits on the regional policy, which applies only to VMs in var.region. The global policy contains no ingress deny at all, so a VM in any other region of this VPC gets no policy-layer ingress deny and falls straight through to VPC firewall rules. Firewall policies are evaluated before VPC firewall rules, so an operator adopting this module to supersede permissive legacy google_compute_firewall allow rules gets that outcome inside var.region and not outside it. No rule engine catches this: each rule is individually correct, and the defect is the mismatch between the two policies' scopes.",
+      "file": "google_compute_region_network_firewall_policy_rule.deny_ingress.tf",
+      "first_seen": "2026-09-08",
+      "fixable": false,
+      "id": "HOLDEN_AI_001",
+      "last_seen": "2026-09-09",
+      "line": 1,
+      "principle": "network-security",
+      "related_resources": [
+        "google_compute_network_firewall_policy_rule.deny_egress",
+        "google_compute_network_firewall_policy.main",
+        "google_compute_region_network_firewall_policy.main"
+      ],
+      "remediation": "Either add a catch-all INGRESS deny to the global policy at var.default_deny_priority so ingress and egress are both network-wide, or document that ingress default-deny is limited to var.region and that other regions need their own regional policy. Prefer the first \u2014 it makes the module's protection match what the README describes.",
+      "resolution": "google_compute_network_firewall_policy_rule.deny_ingress added to the global policy at var.global_deny_ingress_priority (65001), so ingress and egress default-deny are both network-wide. 65001 rather than 65000 because GCP requires unique priorities within a policy and the egress deny holds 65000. The regional ingress deny is now shadowed in the default configuration and kept as a per-region backstop.",
+      "resource": "google_compute_region_network_firewall_policy_rule.deny_ingress",
+      "severity": "MEDIUM",
+      "status": "fixed",
+      "suppression_reason": null,
+      "title": "Default-deny is network-wide for egress but only regional for ingress"
+    },
+    {
+      "confidence": "high",
+      "explanation": "deny_rdp is the module's only rule targeting a specific dangerous port, and it is created only when var.parent is set, which is not the default. With the default var.parent = \"\", count is 0 and no RDP deny is created anywhere. Combined with HOLDEN_AI_001, the default deployment denies inbound RDP only for VMs inside var.region, and only via the regional catch-all rather than an explicit rule. The README states 'RDP from the internet is never allowed below this node' without qualifying that this holds only in the hierarchical configuration. This is an intent-versus-configuration mismatch, not an attribute a rule could test.",
+      "file": "google_compute_firewall_policy_rule.deny_rdp.tf",
+      "first_seen": "2026-09-08",
+      "fixable": false,
+      "id": "HOLDEN_AI_002",
+      "last_seen": "2026-09-09",
+      "line": 2,
+      "principle": "network-security",
+      "related_resources": [
+        "google_compute_firewall_policy.hierarchical",
+        "local.create_hierarchical"
+      ],
+      "remediation": "Either move the RDP deny to the global network policy so it applies unconditionally, or qualify the README sentence to say the RDP deny ships only with the hierarchical policy and requires var.parent.",
+      "resolution": "google_compute_network_firewall_policy_rule.deny_rdp added to the global policy at var.global_deny_rdp_priority (900), above the health check allow, so an RDP deny exists regardless of var.parent. The hierarchical rule is retained for the var.parent path.",
+      "resource": "google_compute_firewall_policy_rule.deny_rdp",
+      "severity": "MEDIUM",
+      "status": "fixed",
+      "suppression_reason": null,
+      "title": "No RDP deny exists in the module's default configuration"
+    },
+    {
+      "confidence": "high",
+      "explanation": "The rule sets no target_secure_tags and no target_service_accounts, so it allows the Google prober ranges to reach every VM on the network on var.health_check_ports, not just the VMs actually behind a load balancer. It sits on the global policy, so this applies network-wide and is evaluated before the regional deny, meaning an allow here beats the catch-all. A VM running an unauthenticated service on 80 that was never meant to be reachable is reachable from the shared prober range. var.health_check_ports validation also accepts ranges, so a caller passing [\"1-65535\"] opens every TCP port on every VM through this one rule.",
+      "file": "google_compute_network_firewall_policy_rule.allow_health_checks.tf",
+      "first_seen": "2026-09-08",
+      "fixable": false,
+      "id": "HOLDEN_AI_003",
+      "last_seen": "2026-09-09",
+      "line": 1,
+      "principle": "network-security",
+      "related_resources": [
+        "var.health_check_ports"
+      ],
+      "remediation": "Add target_secure_tags (or target_service_accounts) to the rule, driven by a new variable, so the allow only covers load-balanced backends. Consider tightening the var.health_check_ports validation to reject ranges wider than a few ports.",
+      "resolution": "Mechanism plus demonstration. allow_health_checks takes a dynamic target_secure_tags block driven by var.health_check_target_tags, and example/examplea now creates google_tags_tag_key.role and google_tags_tag_value.lb_backend and passes the value in. Confirmed in planned values: the rule carries one target_secure_tags block. The module default stays [] so callers that do not scope are unchanged, which means an unscoped caller is still unscoped by choice rather than by omission.",
+      "resource": "google_compute_network_firewall_policy_rule.allow_health_checks",
+      "severity": "LOW",
+      "status": "fixed",
+      "suppression_reason": null,
+      "title": "Health check allow is unscoped, reaching every VM on the network"
+    },
+    {
+      "confidence": "high",
+      "explanation": "The module recognises that a catch-all ingress deny needs a companion allow for traffic that must keep working, and ships allow_health_checks for exactly that. It ships no equivalent for egress. Private Google Access is ordinary egress, so the catch-all egress deny drops it and every call to googleapis.com fails, with routes and DNS untouched and nothing in a plan to show it. This is the asymmetry rather than the deny itself: the module makes one direction safe by default and leaves the other to the caller. The README now documents the allow rule to add, and this configuration is what motivated HLD_GCP_545, written this session and not yet merged.",
+      "file": "google_compute_network_firewall_policy_rule.deny_egress.tf",
+      "first_seen": "2026-09-08",
+      "fixable": false,
+      "id": "HOLDEN_AI_004",
+      "last_seen": "2026-09-09",
+      "line": 1,
+      "principle": "reliability",
+      "related_resources": [
+        "google_compute_network_firewall_policy_rule.allow_health_checks"
+      ],
+      "remediation": "Consider shipping an opt-in egress allow for the Google API range, symmetric with allow_health_checks, so the module's default-deny does not silently break Private Google Access. The README section added this session is the interim mitigation.",
+      "resolution": "google_compute_network_firewall_policy_rule.allow_google_apis added at var.google_apis_priority (1050), egress allow to var.google_apis_egress_ranges (default 199.36.153.8/30) on tcp 443, symmetric with allow_health_checks. HLD_GCP_545 now returns zero findings against this module.",
+      "resource": "google_compute_network_firewall_policy_rule.deny_egress",
+      "severity": "LOW",
+      "status": "fixed",
+      "suppression_reason": null,
+      "title": "Module ships an ingress allow for health checks but no egress allow for Google APIs"
+    }
+  ],
+  "scan_date": "2026-09-09T00:00:00Z",
+  "scan_path": ".",
+  "suggested_policies": [
+    {
+      "rationale": "A firewall policy rule allowing the Google health check prober ranges with no target_secure_tags or target_service_accounts grants that access to every VM on the network, not just load-balanced backends. This is a concrete attribute check on a specific resource type with an unambiguous condition, it fires correctly on any Terraform using these rule types, and coverage_by_type shows the only existing policy on all three rule types is HLD_GCP_367 (logging), which tests a different attribute.",
+      "yaml": "id: HLD_PROPOSED_001\nname: Health check allow rules should be scoped to target VMs\nprinciple: network-security\nseverity: LOW\nrationale: |\n  A rule allowing the Google load balancer prober ranges 35.191.0.0/16 and\n  130.211.0.0/22 without target_secure_tags or target_service_accounts applies\n  to every VM on the network, not only the backends actually behind a load\n  balancer. Any instance listening on the allowed ports becomes reachable from\n  the shared prober range, including instances that were never meant to serve\n  traffic. Scoping the allow to the backends that need it keeps the blast\n  radius to the load-balanced set.\nremediation: |\n  Scope the rule to the VMs that are actually load balanced:\n\n    resource \"google_compute_network_firewall_policy_rule\" \"allow_health_checks\" {\n      firewall_policy = google_compute_network_firewall_policy.policy.name\n      priority        = 1000\n      direction       = \"INGRESS\"\n      action          = \"allow\"\n      enable_logging  = true\n\n      target_secure_tags {\n        name = google_tags_tag_value.lb_backend.id\n      }\n\n      match {\n        src_ip_ranges = [\"35.191.0.0/16\", \"130.211.0.0/22\"]\n\n        layer4_configs {\n          ip_protocol = \"tcp\"\n          ports       = [\"80\", \"443\"]\n        }\n      }\n    }\nresources:\n  google_compute_network_firewall_policy_rule:\n    filter:\n      all:\n        - path: action\n          equals: allow\n        - path: direction\n          equals: INGRESS\n        - any:\n            - path: match.src_ip_ranges\n              contains: \"35.191.0.0/16\"\n            - path: match.src_ip_ranges\n              contains: \"130.211.0.0/22\"\n    any:\n      - path: target_secure_tags\n        not_null: true\n      - path: target_service_accounts\n        not_null: true\n"
+    }
+  ],
+  "suggested_suppressions": [
+    {
+      "confidence": "high",
+      "file": "example/examplea/google_compute_network.firewall.tf",
+      "line": 1,
+      "policy_id": "HLD_GCP_093",
+      "reason": "The check wants a google_compute_firewall referencing this network, but the network is guarded by firewall policies instead, which is the module's entire purpose. module.firewall_policy in example/examplea/module.firewall_policy.tf receives network = google_compute_network.firewall.id and creates google_compute_network_firewall_policy_association.main and google_compute_region_network_firewall_policy_association.main against it. The engine does not traverse into the module to see the associations, and does not treat a policy association as equivalent to a google_compute_firewall. The identical suppression is already applied in example/exampleb for the same reason.",
+      "resource": "google_compute_network.firewall",
+      "suppression_comment": "# holden:ignore:HLD_GCP_093 \u2014 this network is guarded by firewall policies via module.firewall_policy, not google_compute_firewall rules; that is the whole point of the module."
+    }
+  ]
+}

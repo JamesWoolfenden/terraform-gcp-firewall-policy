@@ -9,8 +9,8 @@
 Terraform module for the three firewall policy scopes: a global network
 firewall policy and a regional network firewall policy, both associated with
 the VPC in var.network, and optionally a hierarchical policy on an organization
-or folder. Every rule has logging on. Exercises holden's
-google_compute_network_firewall_policy_rule,
+or folder. Every rule logs, the catch-all denies conditionally. Exercises
+holden's google_compute_network_firewall_policy_rule,
 google_compute_region_network_firewall_policy_rule and
 google_compute_firewall_policy_rule policies.
 
@@ -29,12 +29,23 @@ module "firewall_policy" {
 }
 ```
 
-The global policy ships a default-deny egress rule at priority 65000 and an
-allow for the Google health check ranges at priority 1000, so anything the
-workload actually needs has to be added above 65000. The regional policy ships
-a default-deny ingress rule at the same priority. Both policies are associated
-with var.network, and an association takes effect immediately — apply it to a
-network you can afford to have go quiet.
+The global policy default-denies both directions, at 65000 for egress and
+65001 for ingress, so anything the workload actually needs has to be added
+above those. Above the denies it ships an RDP deny at 900, an allow for the
+Google health check ranges at 1000, and an allow for Private Google Access at
+1050. The regional policy carries its own default-deny ingress at 65000.
+
+Both policies are associated with var.network, and an association takes effect
+immediately — apply it to a network you can afford to have go quiet.
+
+Firewall policies are evaluated hierarchical first, then global, then regional,
+then VPC firewall rules, and the first rule that matches with allow or deny
+ends evaluation. Two consequences worth knowing. The global default-denies
+apply network-wide, so they shadow the regional policy's ingress deny in the
+default configuration; that rule is kept as a backstop for its own region.
+And because the policy layer is evaluated before VPC firewall rules, these
+denies take precedence over any permissive google_compute_firewall rules
+already on the network.
 
 Attach your own rules to either policy using the name outputs, which are what
 the rule resources take as firewall_policy:
@@ -61,54 +72,49 @@ resource "google_compute_network_firewall_policy_rule" "allow_https" {
 
 ### Private Google Access
 
-The default-deny egress rule blocks Private Google Access. PGA is not a
-separate network path: a VM with no external IP reaches the Google API front
-ends over ordinary egress, so it is caught by the deny at 65000 like anything
-else. Nothing reports this — the subnet still has private_ip_google_access =
-true and the routes are untouched — it surfaces as workloads that can no longer
-reach googleapis.com, so logging agents stop shipping, GCS reads hang and
-Artifact Registry pulls fail.
+The module ships the egress allow PGA needs, at priority 1050 for
+199.36.153.8/30, so a default deployment does not break it. Set
+var.google_apis_egress_ranges to ["199.36.153.4/30"] for
+restricted.googleapis.com under VPC Service Controls, or to [] to create no
+rule at all.
 
-If the network uses PGA, add an allow above the deny. Which range depends on
-how googleapis.com resolves on that network:
+It is worth knowing why that rule is there. PGA is not a separate network path:
+a VM with no external IP reaches the Google API front ends over ordinary
+egress, so a catch-all egress deny drops it like anything else. Nothing reports
+that — the subnet still has private_ip_google_access = true and the routes are
+untouched — it surfaces later as workloads that cannot reach googleapis.com, so
+logging agents stop shipping, GCS reads hang and Artifact Registry pulls fail.
 
-```terraform
-resource "google_compute_network_firewall_policy_rule" "allow_google_apis" {
-  firewall_policy = module.firewall_policy.network_policy_name
-  priority        = 1100
-  direction       = "EGRESS"
-  action          = "allow"
-  enable_logging  = true
-  description     = "Private Google Access to the Google API front ends"
-
-  match {
-    # private.googleapis.com. Use 199.36.153.4/30 instead for
-    # restricted.googleapis.com under VPC Service Controls.
-    dest_ip_ranges = ["199.36.153.8/30"]
-
-    layer4_configs {
-      ip_protocol = "tcp"
-      ports       = ["443"]
-    }
-  }
-}
-```
-
-Those two ranges only carry the API traffic when a private DNS zone points
-googleapis.com at them. On a network still resolving googleapis.com to its
-public addresses, PGA egress goes to Google's public API ranges and a narrow
-allow will not cover it. Workloads pulling images also need pkg.dev to resolve
-and be allowed. Egress to the metadata server at 169.254.169.254 is always
+That VIP range only carries the API traffic when a private DNS zone points
+googleapis.com at it. On a network still resolving googleapis.com to its public
+addresses, this narrow allow does not cover it and the workload needs a broader
+egress allow instead. Workloads pulling images also need pkg.dev to resolve and
+be allowed. Egress to the metadata server at 169.254.169.254 is always
 permitted by GCP and needs no rule.
 
-The priorities of the built-in rules are all variables, so a policy that
-already has a rule at 1000 or 65000 can move the module's out of the way
-rather than colliding at apply time.
+The health check allow applies to every VM on the network unless you scope it.
+Pass secure tag values in var.health_check_target_tags to limit it to the
+backends actually behind a load balancer; example/examplea builds a tag key and
+value and wires them in.
 
-var.log_denied_traffic controls logging on the two catch-all deny rules only.
+Both examples also show the routing side of this. They delete the default
+route, replace it with one scoped to 199.36.153.8/30 rather than 0.0.0.0/0 so
+the route matches what the firewall policy allows on egress, and add a private
+googleapis.com zone so the API names resolve to the range that route covers. A
+broad replacement route would reinstate the unrestricted egress the deletion
+was meant to remove.
+
+The priorities of the built-in rules are all variables, so a policy that
+already has a rule at one of the numbers above can move the module's out of the
+way rather than colliding at apply time. GCP requires priorities to be unique
+within a policy, which is why the global policy's two default-denies sit at
+65000 and 65001 rather than sharing one number.
+
+var.log_denied_traffic controls logging on the three catch-all deny rules only.
 Those match everything no higher priority rule allowed, so on a busy network
 they are the highest volume rules in the policy and the dominant Cloud Logging
-ingestion cost. It defaults to true; the targeted rules log unconditionally.
+ingestion cost. It defaults to true; the targeted rules, including the RDP
+deny, log unconditionally.
 
 The hierarchical policy is only created when var.parent is set, and needs
 roles/compute.orgSecurityResourceAdmin at that node. example/exampleb covers
@@ -137,8 +143,11 @@ No modules.
 | [google_compute_firewall_policy_rule.deny_rdp](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_firewall_policy_rule) | resource |
 | [google_compute_network_firewall_policy.main](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_firewall_policy) | resource |
 | [google_compute_network_firewall_policy_association.main](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_firewall_policy_association) | resource |
+| [google_compute_network_firewall_policy_rule.allow_google_apis](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_firewall_policy_rule) | resource |
 | [google_compute_network_firewall_policy_rule.allow_health_checks](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_firewall_policy_rule) | resource |
 | [google_compute_network_firewall_policy_rule.deny_egress](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_firewall_policy_rule) | resource |
+| [google_compute_network_firewall_policy_rule.deny_ingress](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_firewall_policy_rule) | resource |
+| [google_compute_network_firewall_policy_rule.deny_rdp](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_firewall_policy_rule) | resource |
 | [google_compute_region_network_firewall_policy.main](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_region_network_firewall_policy) | resource |
 | [google_compute_region_network_firewall_policy_association.main](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_region_network_firewall_policy_association) | resource |
 | [google_compute_region_network_firewall_policy_rule.deny_ingress](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_region_network_firewall_policy_rule) | resource |
@@ -150,12 +159,17 @@ No modules.
 | <a name="input_default_deny_priority"></a> [default\_deny\_priority](#input\_default\_deny\_priority) | Priority of the catch-all deny rules in the global and regional policies. Rules the workload needs must sit above this, that is at a lower number | `number` | `65000` | no |
 | <a name="input_deny_rdp_priority"></a> [deny\_rdp\_priority](#input\_deny\_rdp\_priority) | Priority of the RDP deny rule in the hierarchical policy | `number` | `1000` | no |
 | <a name="input_description"></a> [description](#input\_description) | Description applied to each firewall policy | `string` | `"Managed by Terraform"` | no |
+| <a name="input_global_deny_ingress_priority"></a> [global\_deny\_ingress\_priority](#input\_global\_deny\_ingress\_priority) | Priority of the catch-all ingress deny in the global policy. Rule priorities are unique within a policy, so this cannot reuse var.default\_deny\_priority, which the global egress deny already holds | `number` | `65001` | no |
+| <a name="input_global_deny_rdp_priority"></a> [global\_deny\_rdp\_priority](#input\_global\_deny\_rdp\_priority) | Priority of the RDP deny in the global policy. Sits above var.health\_check\_priority so the deny is evaluated first, and must differ from it because rule priorities are unique within a policy | `number` | `900` | no |
+| <a name="input_google_apis_egress_ranges"></a> [google\_apis\_egress\_ranges](#input\_google\_apis\_egress\_ranges) | Destinations the Private Google Access egress allow covers. Defaults to the private.googleapis.com VIP range; use 199.36.153.4/30 for restricted.googleapis.com under VPC Service Controls. Empty creates no rule, which leaves the catch-all deny to drop Google API traffic | `list(string)` | <pre>[<br/>  "199.36.153.8/30"<br/>]</pre> | no |
+| <a name="input_google_apis_priority"></a> [google\_apis\_priority](#input\_google\_apis\_priority) | Priority of the Private Google Access egress allow in the global policy. Must sit above var.default\_deny\_priority and differ from every other rule in that policy | `number` | `1050` | no |
 | <a name="input_health_check_ports"></a> [health\_check\_ports](#input\_health\_check\_ports) | TCP ports Google health check probes are allowed to reach | `list(string)` | <pre>[<br/>  "80",<br/>  "443"<br/>]</pre> | no |
 | <a name="input_health_check_priority"></a> [health\_check\_priority](#input\_health\_check\_priority) | Priority of the rule allowing the Google health check ranges into the global policy | `number` | `1000` | no |
+| <a name="input_health_check_target_tags"></a> [health\_check\_target\_tags](#input\_health\_check\_target\_tags) | Secure tag values, each of the form tagValues/NUMERIC\_ID, that the health check allow is scoped to. Empty, the default, leaves that allow applying to every VM on the network rather than only load balanced backends | `list(string)` | `[]` | no |
 | <a name="input_log_denied_traffic"></a> [log\_denied\_traffic](#input\_log\_denied\_traffic) | Log hits on the catch-all deny rules. These match everything no higher priority rule allowed, so on a busy network they are the highest volume rules in the policy and the dominant Cloud Logging ingestion cost. Turning this off keeps the deny, drops the record of it | `bool` | `true` | no |
 | <a name="input_name"></a> [name](#input\_name) | Base name of the firewall policies | `string` | n/a | yes |
 | <a name="input_network"></a> [network](#input\_network) | Self-link of the VPC network the global network firewall policy is associated with | `string` | n/a | yes |
-| <a name="input_parent"></a> [parent](#input\_parent) | Organization or folder the hierarchical firewall policy attaches to, organizations/<id> or folders/<id>. Empty to create no hierarchical policy | `string` | `""` | no |
+| <a name="input_parent"></a> [parent](#input\_parent) | Organization or folder the hierarchical firewall policy attaches to, organizations/ID or folders/ID. Empty to create no hierarchical policy | `string` | `""` | no |
 | <a name="input_region"></a> [region](#input\_region) | Region of the regional network firewall policy | `string` | `"europe-west2"` | no |
 
 ## Outputs

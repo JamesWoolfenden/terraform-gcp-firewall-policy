@@ -6,6 +6,13 @@ resource "google_compute_network_firewall_policy_rule" "allow_health_checks" {
   enable_logging  = true
   description     = "Google load balancer health check probes"
 
+  dynamic "target_secure_tags" {
+    for_each = var.health_check_target_tags
+    content {
+      name = target_secure_tags.value
+    }
+  }
+
   match {
     src_ip_ranges = ["35.191.0.0/16", "130.211.0.0/22"]
 

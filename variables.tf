@@ -31,12 +31,12 @@ variable "region" {
 
 variable "parent" {
   type        = string
-  description = "Organization or folder the hierarchical firewall policy attaches to, organizations/<id> or folders/<id>. Empty to create no hierarchical policy"
+  description = "Organization or folder the hierarchical firewall policy attaches to, organizations/ID or folders/ID. Empty to create no hierarchical policy"
   default     = ""
 
   validation {
     condition     = var.parent == "" || can(regex("^(organizations|folders)/[0-9]+$", var.parent))
-    error_message = "var.parent must be organizations/<id> or folders/<id>"
+    error_message = "var.parent must be organizations/ID or folders/ID"
   }
 }
 
@@ -98,5 +98,60 @@ variable "default_deny_priority" {
   validation {
     condition     = var.default_deny_priority >= 0 && var.default_deny_priority <= 2147483647
     error_message = "var.default_deny_priority must be between 0 and 2147483647"
+  }
+}
+
+variable "global_deny_ingress_priority" {
+  type        = number
+  description = "Priority of the catch-all ingress deny in the global policy. Rule priorities are unique within a policy, so this cannot reuse var.default_deny_priority, which the global egress deny already holds"
+  default     = 65001
+
+  validation {
+    condition     = var.global_deny_ingress_priority >= 0 && var.global_deny_ingress_priority <= 2147483647
+    error_message = "var.global_deny_ingress_priority must be between 0 and 2147483647"
+  }
+}
+
+variable "global_deny_rdp_priority" {
+  type        = number
+  description = "Priority of the RDP deny in the global policy. Sits above var.health_check_priority so the deny is evaluated first, and must differ from it because rule priorities are unique within a policy"
+  default     = 900
+
+  validation {
+    condition     = var.global_deny_rdp_priority >= 0 && var.global_deny_rdp_priority <= 2147483647
+    error_message = "var.global_deny_rdp_priority must be between 0 and 2147483647"
+  }
+}
+
+variable "health_check_target_tags" {
+  type        = list(string)
+  description = "Secure tag values, each of the form tagValues/NUMERIC_ID, that the health check allow is scoped to. Empty, the default, leaves that allow applying to every VM on the network rather than only load balanced backends"
+  default     = []
+
+  validation {
+    condition     = alltrue([for t in var.health_check_target_tags : can(regex("^tagValues/[0-9]+$", t))])
+    error_message = "var.health_check_target_tags entries must look like tagValues/281475471241234"
+  }
+}
+
+variable "google_apis_egress_ranges" {
+  type        = list(string)
+  description = "Destinations the Private Google Access egress allow covers. Defaults to the private.googleapis.com VIP range; use 199.36.153.4/30 for restricted.googleapis.com under VPC Service Controls. Empty creates no rule, which leaves the catch-all deny to drop Google API traffic"
+  default     = ["199.36.153.8/30"]
+
+  validation {
+    condition     = alltrue([for r in var.google_apis_egress_ranges : can(cidrnetmask(r))])
+    error_message = "var.google_apis_egress_ranges entries must be valid CIDR blocks"
+  }
+}
+
+variable "google_apis_priority" {
+  type        = number
+  description = "Priority of the Private Google Access egress allow in the global policy. Must sit above var.default_deny_priority and differ from every other rule in that policy"
+  default     = 1050
+
+  validation {
+    condition     = var.google_apis_priority >= 0 && var.google_apis_priority <= 2147483647
+    error_message = "var.google_apis_priority must be between 0 and 2147483647"
   }
 }
